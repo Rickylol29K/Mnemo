@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- Brand tokens (tweak freely) ---------- */
+:root {
+  --brand: 0 0% 10%;         /* black-ish */
+  --muted: 240 5% 64%;
+}
+
+/* ---------- Page background polish ---------- */
+body {
+  @apply antialiased;
+  background:
+    radial-gradient(60rem 60rem at 10% -10%, hsl(0 0% 98%) 0%, transparent 60%),
+    radial-gradient(60rem 60rem at 110% -10%, hsl(210 100% 98%) 0%, transparent 60%),
+    linear-gradient(to bottom, #fff, #fff);
+}
+
+/* ---------- Micro-animations (motion-safe) ---------- */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes float {
+  0%,100% { transform: translateY(0); }
+  50%     { transform: translateY(-4px); }
+}
+@keyframes pulseBorder {
+  0%   { box-shadow: 0 0 0 0 rgba(59,130,246,0.25); }
+  70%  { box-shadow: 0 0 0 8px rgba(59,130,246,0); }
+  100% { box-shadow: 0 0 0 0 rgba(59,130,246,0); }
+}
+
+.motion-safe .animate-in { animation: fadeIn .4s ease-out both; }
+.motion-safe .animate-in-slow { animation: fadeIn .6s ease-out both; }
+.motion-safe .animate-float { animation: float 3s ease-in-out infinite; }
+.motion-safe .animate-pulse-border { animation: pulseBorder 1.8s ease-out infinite; }
+
+/* ---------- Flip card utility (for Flashcards) ---------- */
+.flip {
+  perspective: 1000px;
+}
+.flip-inner {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 400ms ease;
+}
+.flip[data-show="back"] .flip-inner {
+  transform: rotateY(180deg);
+}
+.flip-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.flip-back {
+  transform: rotateY(180deg);
+}
+
+/* ---------- Nice focus ring ---------- */
+.focus-ring {
+  @apply outline-none ring-2 ring-blue-500 ring-offset-2 ring-offset-white;
+}
+
+/* ---------- Navbar underline animation ---------- */
+.nav-link {
+  position: relative;
+}
+.nav-link::after {
+  content: "";
+  position: absolute;
+  left: 0; bottom: -4px;
+  height: 2px; width: 0%;
+  background: currentColor;
+  transition: width .18s ease;
+  opacity: .85;
+}
+.nav-link:hover::after { width: 100%; }
