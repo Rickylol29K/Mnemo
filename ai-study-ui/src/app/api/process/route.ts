@@ -1,55 +1,32 @@
-// src/app/api/process/route.ts
 import { NextResponse } from "next/server";
-import { openai } from "@/lib/openai";
+import OpenAI from "openai";
 
-/** Safe JSON parse for model replies that *should* be JSON. */
-function safeParseJSON<T = unknown>(text: string | null | undefined, fallback: T): T {
-  if (!text) return fallback;
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    const m = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (m) {
-      try {
-        return JSON.parse(m[1]) as T;
-      } catch {
-        return fallback;
-      }
-    }
-    return fallback;
-  }
-}
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-type QA = { q: string; a: string };
-type StudyPack = {
-  summary: string[];
-  flashcards: QA[];
-  keyTerms: string[];
-  analogies: string[];
-  pitfalls: string[];
-  practice: QA[];
-};
+type Flashcard = { q: string; a: string };
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as {
-      text?: string;
-      regenerate?: boolean;
-      avoid?: { questions?: string[]; answers?: string[] };
-      nonce?: string; // just to break caching/seed variation
-    };
-
-    const { text, regenerate = false, avoid, nonce } = body || {};
+    const { text } = (await req.json()) as { text?: string };
 
     if (!text || typeof text !== "string" || text.trim().length < 10) {
       return NextResponse.json({ error: "Provide more text." }, { status: 400 });
     }
 
-    // ------- Prompt (array-joined to avoid backtick issues) -------
-    const systemLines: string[] = [
+    // -------- TEACHER SYSTEM PROMPT (high quality, no fluff) --------
+    const system = [
       "You are an expert study coach for undergrads.",
-      "Anchor your understanding to the student's notes; only add widely-accepted, standard context.",
-      "Return STRICT JSON ONLY (no code fences) with:",
+      "You transform a student's raw notes into a concise, accurate, and highly educational study pack.",
+      "Anchor your output to the student's notes. Do NOT invent generic business fluff, management clichés, or irrelevant sections.",
+      "If a commonly expected item is missing in the notes, include it ONLY if essential, and prefix with '(Outside notes)'.",
+      "Write in clean Markdown. Use clear headings (##, ###), bold for key terms, and lists. Use tables where they truly help.",
+      "When the topic includes code, include short, correct, *runnable* examples inside fenced code blocks with the correct language tag.",
+      "Explanations should be tight but insightful: show the mental model, a worked example, common pitfalls, and a quick self-check.",
+      "Your tone is helpful, precise, and exam-ready.",
+      "",
+      "Return STRICT JSON ONLY (no code fences, no prose around it) with this exact shape:",
       "{",
       '  "summary": string[],',
       '  "flashcards": { "q": string, "a": string }[],',
@@ -59,117 +36,82 @@ export async function POST(req: Request) {
       '  "practice": { "q": string, "a": string }[]',
       "}",
       "",
-      "Formatting rules:",
-      "- Summary items are Markdown-capable: allow **bold**, *italic*, and inline `code`.",
-      "- For multi-line code, describe that it should be a fenced code block as ONE item (do not include literal fences in JSON).",
-      "- Short headings are allowed as their own items: '# Topic', '## Subtopic'.",
-      "- Keep bullets concise and exam-ready.",
-    ];
+      "Rules for each field:",
+      "- summary: an ordered array of Markdown blocks. Start with a '## TL;DR' (3–5 bullet points), then '## Core Ideas', '## Worked Example(s)' (use code blocks if code appears in notes), '## Common Pitfalls', and '## Quick Self-Check' (short list of questions with brief answers). Each array item may be multi-line Markdown.",
+      "- flashcards: 10–16 tight Q/A items drawn from the notes (no trivia, no filler).",
+      "- keyTerms: 8–20 glossary terms (single terms/short phrases).",
+      "- analogies: 2–5 clear analogies or memory hooks (only if they genuinely help).",
+      "- pitfalls: 3–6 frequent mistakes or misconceptions.",
+      "- practice: 3–5 short Q/A items that check understanding (not duplicates of flashcards).",
+      "",
+      "Formatting reminders:",
+      "- Use bold for important words (**like this**).",
+      "- Use fenced code blocks for any multi-line code examples (do not inline code without fences if more than one line).",
+      "- Prefer the language tag that matches the notes (e.g., ```java, ```python).",
+    ].join("\n");
 
-    if (regenerate) {
-      systemLines.push(
-        "",
-        "REGENERATION MODE:",
-        "- Produce a *fresh* set of flashcards and practice Q&A that does NOT overlap with the provided AVOID lists (neither verbatim nor paraphrased).",
-        "- Vary the angle and phrasing; surface different subtopics/examples from the same source text.",
-        "- Prefer new examples, edge-cases, or applications not used before.",
-        "- If the topic is narrow, still paraphrase to avoid near-duplicates."
-      );
-    }
-
-    const avoidQ = avoid?.questions?.filter(Boolean) ?? [];
-    const avoidA = avoid?.answers?.filter(Boolean) ?? [];
-
-    const userLines: string[] = [
+    // -------- USER CONTENT --------
+    const user = [
       "STUDENT NOTES:",
-      text.slice(0, 20000),
-    ];
-
-    if (avoidQ.length || avoidA.length) {
-      userLines.push("");
-      if (avoidQ.length) {
-        userLines.push("AVOID_QUESTIONS:", ...avoidQ.map((q) => `- ${q}`));
-      }
-      if (avoidA.length) {
-        userLines.push("", "AVOID_ANSWERS:", ...avoidA.map((a) => `- ${a}`));
-      }
-    }
-    if (nonce) {
-      userLines.push("", `REGEN_SEED: ${nonce}`);
-    }
+      text,
+    ].join("\n\n");
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: regenerate ? 0.6 : 0.3, // more variety when regenerating
+      temperature: 0.2, // precise, low-fluff
+      response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: systemLines.join("\n") },
-        { role: "user", content: userLines.join("\n") },
+        { role: "system", content: system },
+        { role: "user", content: user },
       ],
     });
 
-    const content = completion.choices?.[0]?.message?.content ?? "{}";
-    const data = safeParseJSON<Partial<StudyPack>>(content, {});
+    const raw = completion.choices?.[0]?.message?.content || "{}";
 
-    // Shape guards
-    const pack: StudyPack = {
-      summary: Array.isArray(data.summary)
-        ? data.summary.slice(0, 120).map((s) => globalThis.String(s))
-        : [],
-      flashcards: Array.isArray(data.flashcards)
-        ? data.flashcards
-            .slice(0, 200)
-            .map((x) => ({
-              q: globalThis.String((x as any)?.q ?? ""),
-              a: globalThis.String((x as any)?.a ?? ""),
-            }))
-            .filter((x) => x.q && x.a)
-        : [],
-      keyTerms: Array.isArray(data.keyTerms) ? data.keyTerms.slice(0, 200).map((s) => globalThis.String(s)) : [],
-      analogies: Array.isArray(data.analogies) ? data.analogies.slice(0, 100).map((s) => globalThis.String(s)) : [],
-      pitfalls: Array.isArray(data.pitfalls) ? data.pitfalls.slice(0, 100).map((s) => globalThis.String(s)) : [],
-      practice: Array.isArray(data.practice)
-        ? data.practice
-            .slice(0, 100)
-            .map((x) => ({
-              q: globalThis.String((x as any)?.q ?? ""),
-              a: globalThis.String((x as any)?.a ?? ""),
-            }))
-            .filter((x) => x.q && x.a)
-        : [],
+    // Defensive parse
+    let parsed: {
+      summary: string[];
+      flashcards: Flashcard[];
+      keyTerms: string[];
+      analogies: string[];
+      pitfalls: string[];
+      practice: Flashcard[];
     };
 
-    // Top-up only if too short
-    if (pack.summary.length < 8) {
-      const extendSys = [
-        "Return ONLY a JSON array of strings (no wrapper object).",
-        "Each string must be a Markdown-ready bullet or short heading that complements an existing summary.",
-      ].join("\n");
-
-      const extendUser = [
-        `The current summary length is ${pack.summary.length}.`,
-        "Provide 6–10 extra concise items to improve coverage.",
-      ].join("\n");
-
-      const extend = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        temperature: 0.2,
-        messages: [
-          { role: "system", content: extendSys },
-          { role: "user", content: extendUser },
-        ],
-      });
-
-      const extraArr = safeParseJSON<string[]>(
-        extend.choices?.[0]?.message?.content ?? "[]",
-        []
-      ).map((s) => globalThis.String(s));
-
-      pack.summary = [...pack.summary, ...extraArr].slice(0, 24);
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // If the model returns something slightly off, try to salvage
+      parsed = {
+        summary: [raw],
+        flashcards: [],
+        keyTerms: [],
+        analogies: [],
+        pitfalls: [],
+        practice: [],
+      };
     }
 
-    return NextResponse.json(pack);
-  } catch (err) {
-    console.error("process route error:", err);
-    return NextResponse.json({ error: "Processing failed" }, { status: 500 });
+    // Minimal shape guarantees so UI never breaks
+    if (!Array.isArray(parsed.summary)) parsed.summary = [String(parsed.summary ?? "")];
+    if (!Array.isArray(parsed.flashcards)) parsed.flashcards = [];
+    if (!Array.isArray(parsed.keyTerms)) parsed.keyTerms = [];
+    if (!Array.isArray(parsed.analogies)) parsed.analogies = [];
+    if (!Array.isArray(parsed.pitfalls)) parsed.pitfalls = [];
+    if (!Array.isArray(parsed.practice)) parsed.practice = [];
+
+    // Trim / sanitize a bit
+    parsed.summary = parsed.summary.map((s) => String(s ?? "").trim()).filter(Boolean);
+    parsed.keyTerms = parsed.keyTerms.map((s) => String(s ?? "").trim()).filter(Boolean);
+    parsed.analogies = parsed.analogies.map((s) => String(s ?? "").trim()).filter(Boolean);
+    parsed.pitfalls = parsed.pitfalls.map((s) => String(s ?? "").trim()).filter(Boolean);
+
+    return NextResponse.json(parsed);
+  } catch (err: any) {
+    console.error("/api/process error:", err);
+    return NextResponse.json(
+      { error: err?.message ?? "Unexpected error." },
+      { status: 500 }
+    );
   }
 }

@@ -4,13 +4,20 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useStudyStore } from "@/store/useStudyStore";
 import { toast } from "sonner";
 import { saveQuiz } from "@/lib/db";
+import { supabase } from "@/lib/supabase-browser";
+
+/* ----------------------------- Types ----------------------------- */
 
 type Card = { q: string; a: string };
 type Q = { prompt: string; options: string[]; correctIndex: number };
+type QuizAPI = { questions: Q[] };
+
+/* --------------------------- Utilities --------------------------- */
 
 function makeMCQs(cards: Card[], count = 10): Q[] {
   const deck = cards.slice();
   const qs: Q[] = [];
+
   function pickDistractors(correct: string, pool: string[], k: number) {
     const candidates = pool.filter((x) => x !== correct);
     const out: string[] = [];
@@ -21,6 +28,7 @@ function makeMCQs(cards: Card[], count = 10): Q[] {
     }
     return out;
   }
+
   for (let i = 0; i < deck.length && qs.length < count; i++) {
     const c = deck[i];
     if (!c?.q || !c?.a) continue;
@@ -35,12 +43,18 @@ function makeMCQs(cards: Card[], count = 10): Q[] {
   return qs;
 }
 
+/* ----------------------------- View ------------------------------ */
+
 export default function Quiz() {
-  const flashcards = useStudyStore((s) => s.flashcards) as Card[];
+  const flashcards = (useStudyStore((s) => s.flashcards) as Card[]) ?? [];
+  const rawText = (useStudyStore((s) => s.rawText) as string | null) ?? null;
+
   const [built, setBuilt] = useState<Q[]>([]);
   const [picked, setPicked] = useState<number[]>([]);
   const [score, setScore] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
 
+  // initial build from flashcards (fast)
   useEffect(() => {
     const qs = makeMCQs(flashcards ?? [], 10);
     setBuilt(qs);
@@ -57,18 +71,85 @@ export default function Quiz() {
       return cp;
     });
   }
+
   function grade(): void {
     let s = 0;
     for (let i = 0; i < built.length; i++) if (picked[i] === built[i].correctIndex) s++;
     setScore(s);
   }
-  function resetQuizFromCards(): void {
-    const qs = makeMCQs(flashcards ?? [], 10);
+
+  function resetWith(qs: Q[]): void {
     setBuilt(qs);
     setPicked(new Array(qs.length).fill(-1));
     setScore(null);
   }
 
+  function rebuildFromCurrent(): void {
+    resetWith(makeMCQs(flashcards ?? [], 10));
+  }
+
+  /** Regenerate BRAND-NEW MCQs from AI with explicit Bearer token. */
+  async function regenerateFreshFromAI(): Promise<void> {
+    if (!rawText || rawText.trim().length < 10) {
+      toast.info("Upload some notes first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      toast.loading("Generating new questions…", { id: "regen-quiz" });
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+
+      const res = await fetch("/api/quiz?ts=" + Date.now(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text: rawText, n: 12 }),
+      });
+
+      if (res.status === 403) {
+        const payload = await res.json().catch(() => ({}));
+        toast.error(payload?.error || "Guest limit reached. Please log in.");
+        return;
+      }
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.error || "Failed to generate quiz.");
+      }
+
+      const data = (await res.json()) as QuizAPI;
+      const qs = Array.isArray(data.questions) ? data.questions : [];
+      if (!qs.length) {
+        toast.info("No questions returned. Try again.");
+        return;
+      }
+
+      const cleaned = qs.filter(
+        (q) =>
+          q.prompt &&
+          Array.isArray(q.options) &&
+          q.options.filter(Boolean).length >= 3 &&
+          q.correctIndex >= 0 &&
+          q.correctIndex < q.options.length
+      );
+
+      resetWith(cleaned);
+      toast.success("New AI-generated quiz ready.", { id: "regen-quiz" });
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Something went wrong.", { id: "regen-quiz" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Save current quiz to dashboard. */
   async function handleSave(): Promise<void> {
     if (!built.length) {
       toast.info("Nothing to save yet.");
@@ -79,14 +160,18 @@ export default function Quiz() {
 
     try {
       toast.loading("Saving quiz…", { id: "save-quiz" });
-      const id = await saveQuiz(
+      await saveQuiz(
         title.trim(),
-        built.map((q) => ({ prompt: q.prompt, options: q.options, correctIndex: q.correctIndex }))
+        built.map((q) => ({
+          prompt: q.prompt,
+          options: q.options,
+          correctIndex: q.correctIndex,
+        }))
       );
       toast.success("Saved to your dashboard.", { id: "save-quiz" });
     } catch (e: any) {
       console.error(e);
-      toast.error(e?.message || "Could not save.", { id: "save-quiz" });
+      toast.error(e?.message || "Could not save quiz.", { id: "save-quiz" });
     }
   }
 
@@ -97,17 +182,26 @@ export default function Quiz() {
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={resetQuizFromCards}
+            onClick={rebuildFromCurrent}
             className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
-            disabled={!(flashcards?.length ?? 0)}
+            disabled={busy || !(flashcards?.length ?? 0)}
           >
-            Rebuild
+            Rebuild from cards
+          </button>
+          <button
+            type="button"
+            onClick={regenerateFreshFromAI}
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
+            disabled={busy || !rawText}
+            title={!rawText ? "Upload notes first" : "Generate all-new questions"}
+          >
+            {busy ? "Working…" : "Regenerate"}
           </button>
           <button
             type="button"
             onClick={handleSave}
             className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
-            disabled={!built.length}
+            disabled={!built.length || busy}
           >
             Save
           </button>
@@ -117,7 +211,7 @@ export default function Quiz() {
       <div className="px-6 py-5">
         {!built.length ? (
           <div className="rounded-lg border bg-zinc-50 p-4 text-sm text-zinc-600">
-            Generate flashcards first to build a quiz.
+            Generate a quiz to get started.
           </div>
         ) : (
           <div className="space-y-6">
@@ -136,7 +230,10 @@ export default function Quiz() {
                       <button
                         type="button"
                         key={oi}
-                        onClick={() => choose(i, oi)}
+                        onClick={() => {
+                          if (score !== null) return;
+                          choose(i, oi);
+                        }}
                         className={[
                           "rounded-lg border px-3 py-2 text-left text-sm transition",
                           chosen ? "ring-2 ring-zinc-300" : "",

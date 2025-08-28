@@ -1,17 +1,32 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { useStudyStore } from "@/store/useStudyStore";
 import { toast } from "sonner";
+import { useStudyStore } from "@/store/useStudyStore";
 import { saveFlashcards } from "@/lib/db";
+import { supabase } from "@/lib/supabase-browser";
+
+/* ----------------------------- Types ----------------------------- */
 
 type Card = { q: string; a: string };
+
 type Extras = {
   keyTerms: string[];
   analogies: string[];
   pitfalls: string[];
   practice: { q: string; a: string }[];
 };
+
+type AIResponse = {
+  summary: string[];
+  flashcards: Card[];
+  keyTerms: string[];
+  analogies: string[];
+  pitfalls: string[];
+  practice: { q: string; a: string }[];
+};
+
+/* --------------------------- Utilities --------------------------- */
 
 function shuffle<T>(arr: T[]) {
   const a = arr.slice();
@@ -22,15 +37,41 @@ function shuffle<T>(arr: T[]) {
   return a;
 }
 
+function updateStoreSafely(payload: Partial<AIResponse>) {
+  try {
+    const anyStore = useStudyStore as unknown as {
+      getState: () => Record<string, unknown>;
+      setState: (u: any) => void;
+    };
+    const st = anyStore.getState?.() ?? {};
+    (st as any).setFlashcards?.(payload.flashcards);
+    (st as any).setKeyTerms?.(payload.keyTerms);
+    (st as any).setExtras?.({
+      keyTerms: payload.keyTerms,
+      analogies: payload.analogies,
+      pitfalls: payload.pitfalls,
+      practice: payload.practice,
+    });
+    (st as any).setSummary?.(payload.summary);
+  } catch {
+    /* noop */
+  }
+}
+
+/* ----------------------------- View ------------------------------ */
+
 export default function Flashcards() {
-  const flashcards = useStudyStore((s) => s.flashcards) as Card[];
-  const rawText = useStudyStore((s) => s.rawText) as string | null;
+  const initialDeck = (useStudyStore((s) => s.flashcards) as Card[]) ?? [];
+  const rawText = (useStudyStore((s) => s.rawText) as string | null) ?? null;
   const extras = useStudyStore((s) => s.extras) as Extras | undefined;
 
+  const [deck, setDeck] = useState<Card[]>(initialDeck);
   const [order, setOrder] = useState<number[]>([]);
   const [idx, setIdx] = useState(0);
   const [showAns, setShowAns] = useState(false);
-  const deck: Card[] = flashcards ?? [];
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setDeck(initialDeck), [initialDeck]);
 
   useEffect(() => {
     const ord = deck.map((_, i) => i);
@@ -68,7 +109,7 @@ export default function Flashcards() {
 
     try {
       toast.loading("Saving flashcards…", { id: "save-fc" });
-      const id = await saveFlashcards(title.trim(), deck);
+      await saveFlashcards(title.trim(), deck);
       toast.success("Saved to your dashboard.", { id: "save-fc" });
     } catch (e: any) {
       console.error(e);
@@ -76,8 +117,54 @@ export default function Flashcards() {
     }
   }
 
-  // regenerate() omitted here for brevity; keep your current implementation.
-  // If you don't have it in this file, remove the button.
+  /** Fresh run via /api/process with explicit Bearer token */
+  async function regenerate(): Promise<void> {
+    if (!rawText || rawText.trim().length < 10) {
+      toast.info("Upload some notes first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      toast.loading("Regenerating flashcards…", { id: "regen-fc" });
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      if (session?.access_token) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      }
+
+      const res = await fetch("/api/process?ts=" + Date.now(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ text: rawText }),
+      });
+
+      if (res.status === 403) {
+        const payload = await res.json().catch(() => ({}));
+        toast.error(payload?.error || "Guest limit reached. Please log in.");
+        return;
+      }
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.error || "Failed to regenerate.");
+      }
+
+      const ai = (await res.json()) as AIResponse;
+      const fresh = Array.isArray(ai.flashcards) ? ai.flashcards : [];
+      setDeck(fresh);
+      updateStoreSafely(ai);
+
+      toast.success("New flashcards generated.", { id: "regen-fc" });
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Something went wrong.", { id: "regen-fc" });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="rounded-xl border bg-white">
@@ -88,15 +175,24 @@ export default function Flashcards() {
             type="button"
             onClick={reshuffle}
             className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
-            disabled={!deck.length}
+            disabled={!deck.length || busy}
           >
             Shuffle
           </button>
           <button
             type="button"
+            onClick={regenerate}
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
+            disabled={busy || !rawText}
+            title={!rawText ? "Upload notes first" : "Regenerate fresh cards"}
+          >
+            {busy ? "Working…" : "Regenerate"}
+          </button>
+          <button
+            type="button"
             onClick={handleSave}
             className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
-            disabled={!deck.length}
+            disabled={!deck.length || busy}
           >
             Save
           </button>
@@ -114,7 +210,9 @@ export default function Flashcards() {
               <p className="mb-1 text-sm uppercase tracking-wide text-zinc-500">
                 Card {idx + 1} / {order.length}
               </p>
-              <div className="text-base font-medium leading-relaxed">{current?.q}</div>
+              <div className="text-base font-medium leading-relaxed">
+                {current?.q}
+              </div>
 
               {showAns ? (
                 <div className="mt-4 rounded-lg border bg-zinc-50 p-3">
