@@ -6,8 +6,6 @@ import { useStudyStore } from "@/store/useStudyStore";
 import { saveFlashcards } from "@/lib/db";
 import { supabase } from "@/lib/supabase-browser";
 
-/* ----------------------------- Types ----------------------------- */
-
 type Card = { q: string; a: string };
 
 type Extras = {
@@ -26,7 +24,10 @@ type AIResponse = {
   practice: { q: string; a: string }[];
 };
 
-/* --------------------------- Utilities --------------------------- */
+type Props = {
+  /** Optional explicit deck. If omitted, component uses the global store. */
+  items?: Card[];
+};
 
 function shuffle<T>(arr: T[]) {
   const a = arr.slice();
@@ -58,20 +59,23 @@ function updateStoreSafely(payload: Partial<AIResponse>) {
   }
 }
 
-/* ----------------------------- View ------------------------------ */
-
-export default function Flashcards() {
-  const initialDeck = (useStudyStore((s) => s.flashcards) as Card[]) ?? [];
+export default function Flashcards({ items }: Props) {
+  const storeDeck = (useStudyStore((s) => s.flashcards) as Card[]) ?? [];
   const rawText = (useStudyStore((s) => s.rawText) as string | null) ?? null;
-  const extras = useStudyStore((s) => s.extras) as Extras | undefined;
+  useStudyStore((s) => s.extras as Extras | undefined); // subscribe, even if unused directly
 
-  const [deck, setDeck] = useState<Card[]>(initialDeck);
+  const initial = Array.isArray(items) && items.length ? items : storeDeck;
+
+  const [deck, setDeck] = useState<Card[]>(initial);
   const [order, setOrder] = useState<number[]>([]);
   const [idx, setIdx] = useState(0);
   const [showAns, setShowAns] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => setDeck(initialDeck), [initialDeck]);
+  // Update if props.items change OR store changes
+  useEffect(() => {
+    setDeck(Array.isArray(items) && items.length ? items : storeDeck);
+  }, [JSON.stringify(items), storeDeck]);
 
   useEffect(() => {
     const ord = deck.map((_, i) => i);
@@ -85,21 +89,21 @@ export default function Flashcards() {
     return deck[order[idx]] ?? null;
   }, [order, idx, deck]);
 
-  function next(): void {
+  function next() {
     setShowAns(false);
     setIdx((i) => Math.min(i + 1, Math.max(order.length - 1, 0)));
   }
-  function prev(): void {
+  function prev() {
     setShowAns(false);
     setIdx((i) => Math.max(i - 1, 0));
   }
-  function reshuffle(): void {
+  function reshuffle() {
     setOrder((o) => shuffle(o));
     setIdx(0);
     setShowAns(false);
   }
 
-  async function handleSave(): Promise<void> {
+  async function handleSave() {
     if (!deck.length) {
       toast.info("Nothing to save yet.");
       return;
@@ -118,7 +122,7 @@ export default function Flashcards() {
   }
 
   /** Fresh run via /api/process with explicit Bearer token */
-  async function regenerate(): Promise<void> {
+  async function regenerate() {
     if (!rawText || rawText.trim().length < 10) {
       toast.info("Upload some notes first.");
       return;
@@ -154,6 +158,7 @@ export default function Flashcards() {
 
       const ai = (await res.json()) as AIResponse;
       const fresh = Array.isArray(ai.flashcards) ? ai.flashcards : [];
+
       setDeck(fresh);
       updateStoreSafely(ai);
 

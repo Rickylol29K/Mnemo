@@ -1,73 +1,38 @@
 "use client";
 
-import React, { useMemo, useRef } from "react";
-import { useStudyStore } from "@/store/useStudyStore";
-import Markdown from "./Markdown";
-import { toast } from "sonner";
+import React from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
-export default function SummaryBlock() {
-  const { summary, extras } = useStudyStore((s) => ({
-    summary: s.summary,
-    extras: s.extras,
-  }));
+type Props = {
+  /** Array of markdown blocks (each item may contain headings, lists, code fences, etc.) */
+  summary: string[];
+};
 
-  const mdString = useMemo(() => {
-    const parts: string[] = [];
+export default function SummaryBlock({ summary }: Props) {
+  if (!Array.isArray(summary) || summary.length === 0) return null;
 
-    // If the author provided headings / code blocks, we include verbatim.
-    // Otherwise, format as a bullet list.
-    for (const item of summary ?? []) {
-      const trimmed = (item || "").trim();
-      if (!trimmed) continue;
-      const isHeading = /^#{1,6}\s+/.test(trimmed);
-      const isFence = /^```/.test(trimmed);
-      if (isHeading || isFence) {
-        parts.push(trimmed);
-      } else {
-        // allow inline bold/italics/`code` within bullets
-        parts.push(`- ${trimmed}`);
-      }
-    }
+  const joined = summary.join("\n\n");
 
-    if (extras?.keyTerms?.length) {
-      parts.push("\n---\n");
-      parts.push("### Key Terms");
-      parts.push(
-        extras.keyTerms.map((t) => `- \`${t}\``).join("\n")
-      );
-    }
-
-    return parts.join("\n");
-  }, [summary, extras?.keyTerms]);
-
-  const textForCopy = useRef(mdString);
-
-  async function handleCopy() {
+  const copyAll = async () => {
     try {
-      await navigator.clipboard.writeText(textForCopy.current);
-      toast.success("Summary copied as Markdown");
+      await navigator.clipboard.writeText(joined);
     } catch {
-      toast.error("Could not copy to clipboard");
+      /* no-op */
     }
-  }
+  };
 
-  function handleDownload() {
-    const blob = new Blob([mdString], { type: "text/markdown;charset=utf-8" });
+  const download = () => {
+    const blob = new Blob([joined], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = "summary.md";
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
-  }
-
-  if (!summary?.length) {
-    return (
-      <div className="rounded-xl border bg-white p-6 text-zinc-600">
-        Upload a document to generate a summary.
-      </div>
-    );
-  }
+  };
 
   return (
     <div className="rounded-xl border bg-white">
@@ -75,22 +40,28 @@ export default function SummaryBlock() {
         <h2 className="text-lg font-semibold tracking-tight">Summary</h2>
         <div className="flex gap-2">
           <button
-            onClick={handleCopy}
-            className="inline-flex items-center rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
+            type="button"
+            onClick={copyAll}
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
           >
             Copy
           </button>
           <button
-            onClick={handleDownload}
-            className="inline-flex items-center rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
+            type="button"
+            onClick={download}
+            className="rounded-lg border px-3 py-1.5 text-sm hover:bg-zinc-50"
           >
             Download .md
           </button>
         </div>
       </div>
 
-      <div className="px-6 py-5">
-        <Markdown content={mdString} />
+      <div className="prose prose-zinc max-w-none px-6 py-5">
+        {summary.map((block, i) => (
+          <div key={i} className={i > 0 ? "mt-6" : ""}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block}</ReactMarkdown>
+          </div>
+        ))}
       </div>
     </div>
   );
