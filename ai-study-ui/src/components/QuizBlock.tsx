@@ -1,10 +1,10 @@
 "use client";
 
 import React from "react";
-import Quiz from "@/components/Quiz";
+import Quiz, { type Q } from "@/components/Quiz";
 
-export default function QuizBlock() {
-  // simple wrapper so existing imports in page.tsx resolve
-  return <Quiz />;
+type Props = { items?: Q[] };
+
+export default function QuizBlock({ items }: Props) {
+  return <Quiz items={items} />;
 }
-

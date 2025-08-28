@@ -6,13 +6,14 @@ import { toast } from "sonner";
 import { saveQuiz } from "@/lib/db";
 import { supabase } from "@/lib/supabase-browser";
 
-/* ----------------------------- Types ----------------------------- */
-
 type Card = { q: string; a: string };
-type Q = { prompt: string; options: string[]; correctIndex: number };
+export type Q = { prompt: string; options: string[]; correctIndex: number };
 type QuizAPI = { questions: Q[] };
 
-/* --------------------------- Utilities --------------------------- */
+type Props = {
+  /** Optional explicit list of MCQs to show initially. */
+  items?: Q[];
+};
 
 function makeMCQs(cards: Card[], count = 10): Q[] {
   const deck = cards.slice();
@@ -43,9 +44,7 @@ function makeMCQs(cards: Card[], count = 10): Q[] {
   return qs;
 }
 
-/* ----------------------------- View ------------------------------ */
-
-export default function Quiz() {
+export default function Quiz({ items }: Props) {
   const flashcards = (useStudyStore((s) => s.flashcards) as Card[]) ?? [];
   const rawText = (useStudyStore((s) => s.rawText) as string | null) ?? null;
 
@@ -54,17 +53,20 @@ export default function Quiz() {
   const [score, setScore] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // initial build from flashcards (fast)
+  // initial build: prefer props.items; else synthesize from flashcards
   useEffect(() => {
-    const qs = makeMCQs(flashcards ?? [], 10);
-    setBuilt(qs);
-    setPicked(new Array(qs.length).fill(-1));
+    const initial = Array.isArray(items) && items.length
+      ? items
+      : makeMCQs(flashcards ?? [], 10);
+    setBuilt(initial);
+    setPicked(new Array(initial.length).fill(-1));
     setScore(null);
-  }, [flashcards?.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(items), flashcards?.length]);
 
   const allAnswered = useMemo(() => picked.length > 0 && picked.every((p) => p >= 0), [picked]);
 
-  function choose(qi: number, oi: number): void {
+  function choose(qi: number, oi: number) {
     setPicked((p) => {
       const cp = p.slice();
       cp[qi] = oi;
@@ -72,24 +74,24 @@ export default function Quiz() {
     });
   }
 
-  function grade(): void {
+  function grade() {
     let s = 0;
     for (let i = 0; i < built.length; i++) if (picked[i] === built[i].correctIndex) s++;
     setScore(s);
   }
 
-  function resetWith(qs: Q[]): void {
+  function resetWith(qs: Q[]) {
     setBuilt(qs);
     setPicked(new Array(qs.length).fill(-1));
     setScore(null);
   }
 
-  function rebuildFromCurrent(): void {
+  function rebuildFromCurrent() {
     resetWith(makeMCQs(flashcards ?? [], 10));
   }
 
   /** Regenerate BRAND-NEW MCQs from AI with explicit Bearer token. */
-  async function regenerateFreshFromAI(): Promise<void> {
+  async function regenerateFreshFromAI() {
     if (!rawText || rawText.trim().length < 10) {
       toast.info("Upload some notes first.");
       return;
@@ -98,14 +100,9 @@ export default function Quiz() {
     try {
       toast.loading("Generating new questions…", { id: "regen-quiz" });
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
+      const { data: { session } } = await supabase.auth.getSession();
       const headers: HeadersInit = { "Content-Type": "application/json" };
-      if (session?.access_token) {
-        headers["Authorization"] = `Bearer ${session.access_token}`;
-      }
+      if (session?.access_token) headers["Authorization"] = `Bearer ${session.access_token}`;
 
       const res = await fetch("/api/quiz?ts=" + Date.now(), {
         method: "POST",
@@ -150,7 +147,7 @@ export default function Quiz() {
   }
 
   /** Save current quiz to dashboard. */
-  async function handleSave(): Promise<void> {
+  async function handleSave() {
     if (!built.length) {
       toast.info("Nothing to save yet.");
       return;
